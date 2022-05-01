@@ -55,6 +55,11 @@ public class ExtraField {
     static final int ALIGNMENT_ZIP_EXTRA_DATA_FIELD_HEADER_ID = 0xd935;
 
     /**
+     * Header ID for field with linking entry.
+     */
+    static final int LINKING_ENTRY_EXTRA_DATA_FIELD_HEADER_ID = 0x2333;
+
+    /**
      * The field's raw data, if it is known. Either this variable or {@link #segments} must be
      * non-{@code null}.
      */
@@ -401,6 +406,49 @@ public class ExtraField {
         @Override
         public int getHeaderId() {
             return ALIGNMENT_ZIP_EXTRA_DATA_FIELD_HEADER_ID;
+        }
+    }
+
+    public static class LinkingEntrySegment implements Segment {
+
+        private final StoredEntry linkingEntry;
+        private int dataOffset = -1;
+        private long zipOffset = -1;
+
+        public LinkingEntrySegment(@Nonnull StoredEntry linkingEntry) {
+            Preconditions.checkArgument(linkingEntry.isLinkingEntry(), "linkingEntry is not a linking entry");
+            this.linkingEntry = linkingEntry;
+        }
+
+        @Override
+        public int getHeaderId() {
+            return LINKING_ENTRY_EXTRA_DATA_FIELD_HEADER_ID;
+        }
+
+        @Override
+        public int size() {
+            return linkingEntry.isDummyEntry() ? 0 : linkingEntry.getLocalHeaderSize() + 4;
+        }
+
+        public void setOffset(int dataOffset, long zipOffset) {
+            this.dataOffset = dataOffset;
+            this.zipOffset = zipOffset;
+        }
+
+        @Override
+        public void write(@Nonnull ByteBuffer out) throws IOException {
+            if (dataOffset < 0 || zipOffset < 0) {
+                throw new IOException("linking entry has wrong offset");
+            }
+            if (!linkingEntry.isDummyEntry()) {
+                LittleEndianUtils.writeUnsigned2Le(out, LINKING_ENTRY_EXTRA_DATA_FIELD_HEADER_ID);
+                LittleEndianUtils.writeUnsigned2Le(out, linkingEntry.getLocalHeaderSize());
+                var offset = out.position();
+                out.put(linkingEntry.toHeaderData(dataOffset - linkingEntry.getLocalHeaderSize() - offset));
+                linkingEntry.replaceSourceFromZip(offset + zipOffset);
+            } else {
+                linkingEntry.replaceSourceFromZip(zipOffset + dataOffset + linkingEntry.getNestedOffset());
+            }
         }
     }
 }

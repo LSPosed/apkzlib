@@ -199,6 +199,16 @@ public class StoredEntry {
     @Nonnull
     private final VerifyLog verifyLog;
 
+    /** Entry it is linking to. */
+    @Nullable
+    private final StoredEntry linkedEntry;
+
+    /** Offset of the nested link. */
+    private final long nestedOffset;
+
+    /** Dummy entry won't be written to file. */
+    private final boolean dummy;
+
     /**
      * Creates a new stored entry.
      *
@@ -214,10 +224,36 @@ public class StoredEntry {
             @Nonnull ZFile file,
             @Nullable ProcessedAndRawByteSources source)
             throws IOException {
+        this(header, file, source, null, 0, false);
+    }
+
+    StoredEntry(
+            @Nonnull String name,
+            @Nonnull ZFile file,
+            @Nonnull StoredEntry linkedEntry,
+            @Nullable StoredEntry nestedEntry,
+            long nestedOffset,
+            boolean dummy)
+            throws IOException {
+        this((nestedEntry == null ? linkedEntry : nestedEntry).linkingCentralDirectoryHeader(name, file),
+                file, (nestedEntry == null ? linkedEntry : nestedEntry).getSource(), linkedEntry, nestedOffset, dummy);
+    }
+
+    private StoredEntry(
+            @Nonnull CentralDirectoryHeader header,
+            @Nonnull ZFile file,
+            @Nullable ProcessedAndRawByteSources source,
+            @Nullable StoredEntry linkedEntry,
+            long nestedOffset,
+            boolean dummy)
+            throws IOException {
         cdh = header;
         this.file = file;
         deleted = false;
         verifyLog = file.makeVerifyLog();
+        this.linkedEntry = linkedEntry;
+        this.nestedOffset = nestedOffset;
+        this.dummy = dummy;
 
         if (header.getOffset() >= 0) {
             /*
@@ -298,6 +334,12 @@ public class StoredEntry {
                 throw new IOException("Failed to read data descriptor record.", e);
             }
         }
+    }
+
+    private CentralDirectoryHeader linkingCentralDirectoryHeader(String name, ZFile file) {
+        boolean encodeWithUtf8 = !EncodeUtils.canAsciiEncode(name);
+        GPFlags flags = GPFlags.make(encodeWithUtf8);
+        return cdh.link(name, EncodeUtils.encode(name, flags), flags, file);
     }
 
     /**
@@ -625,7 +667,8 @@ public class StoredEntry {
         ProcessedAndRawByteSources oldSource = source;
         source = createSourceFromZip(zipFileOffset);
         cdh.setOffset(zipFileOffset);
-        oldSource.close();
+        if (!isLinkingEntry())
+            oldSource.close();
     }
 
     /**
@@ -650,7 +693,8 @@ public class StoredEntry {
         source = createSourcesFromRawContents(new CloseableDelegateByteSource(
                 ByteSource.wrap(rawContents), rawContents.length));
         cdh.setOffset(-1);
-        oldSource.close();
+        if (!isLinkingEntry())
+            oldSource.close();
     }
 
     /**
@@ -697,7 +741,8 @@ public class StoredEntry {
      * @throws IOException failed to get header byte data
      */
     @Nonnull
-    byte[] toHeaderData() throws IOException {
+    byte[] toHeaderData(int extraOffset) throws IOException {
+        Preconditions.checkArgument(extraOffset >= 0 , "extraOffset < 0");
 
         byte[] encodedFileName = cdh.getEncodedFileName();
 
@@ -724,7 +769,7 @@ public class StoredEntry {
         F_COMPRESSED_SIZE.write(out, compressInfo.getCompressedSize());
         F_UNCOMPRESSED_SIZE.write(out, cdh.getUncompressedSize());
         F_FILE_NAME_LENGTH.write(out, cdh.getEncodedFileName().length);
-        F_EXTRA_LENGTH.write(out, localExtra.size());
+        F_EXTRA_LENGTH.write(out, localExtra.size() + extraOffset + nestedOffset);
 
         out.put(cdh.getEncodedFileName());
         localExtra.write(out);
@@ -747,7 +792,21 @@ public class StoredEntry {
     public boolean realign() throws IOException {
         Preconditions.checkState(!deleted, "Entry has been deleted.");
 
+        if (isLinkingEntry()) return true;
+
         return file.realign(this);
+    }
+
+    public boolean isLinkingEntry() {
+        return linkedEntry != null;
+    }
+
+    public boolean isDummyEntry() {
+        return dummy;
+    }
+
+    public long getNestedOffset() {
+        return nestedOffset;
     }
 
     /**
